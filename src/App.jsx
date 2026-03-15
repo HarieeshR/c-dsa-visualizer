@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Play, Terminal, Code2, Loader2, Copy, Check, FileText, Keyboard, Eye, ChevronLeft, ChevronRight, Cpu, AlertTriangle, SkipBack, SkipForward } from "lucide-react";
+import { Play, Terminal, Code2, Loader2, Copy, Check, FileText, Keyboard, Eye, ChevronLeft, ChevronRight, Cpu, AlertTriangle, SkipBack, SkipForward, ListTree } from "lucide-react";
 
 // ─── THEME ───────────────────────────────────────────────────
 const TH = {
@@ -406,11 +406,40 @@ function interpret(ast, stdinStr) {
   let stdout = "";
   let stepCount = 0;
   const stdinLines = (stdinStr||"").split("\n");
+  const stdinTokens = (stdinStr||"").trim().split(/\s+/).filter(Boolean);
   let stdinPos = 0;
+  let stdinTokPos = 0;
   const callStack = [];
   const curFrame = () => callStack[callStack.length-1];
 
   const mkErr = (msg, line) => Object.assign(new Error(msg), {cline:line});
+  let lastNode = null;
+  let lastLine = null;
+
+  function captureState() {
+    return {
+      globals: deepCopy(globals),
+      stack: callStack.map(f => ({name:f.name, locals:deepCopy(f.locals)})),
+      heap: deepCopy(heap),
+    };
+  }
+
+  function wrapError(e) {
+    if (!e) return e;
+    if (!e._trace) {
+      e._trace = {
+        node: lastNode ? { kind: lastNode.kind, line: lastNode.line } : null,
+        line: e.cline || lastLine || 0,
+        state: captureState(),
+        stack: e.stack || "",
+      };
+      try {
+        console.log("Current AST node:", lastNode);
+        console.log("Execution state:", e._trace.state);
+      } catch {}
+    }
+    return e;
+  }
 
   function snap(line, desc) {
     if (++stepCount > STEP_LIMIT) throw mkErr("Step limit — possible infinite loop", line);
@@ -598,23 +627,39 @@ function interpret(ast, stdinStr) {
   function evalE(node) {
     if (!node) return 0;
     const ln=node.line;
+    lastNode = node; lastLine = ln;
     switch(node.kind) {
       case "Num": return node.v;
       case "Str": return node.v;
       case "Id": return readVar(node.name, ln);
       case "Bin": {
-        const l=evalE(node.l), r=evalE(node.r);
         switch(node.op) {
-          case "+": return (typeof l==="string"||typeof r==="string")?String(l)+String(r):l+r;
-          case "-": return l-r; case "*": return l*r;
-          case "/": if(r===0) throw mkErr("Division by zero",ln); return (Number.isInteger(l)&&Number.isInteger(r))?Math.trunc(l/r):l/r;
-          case "%": if(r===0) return 0; return ((l%r)+Math.abs(r))%Math.abs(r);
-          case "==": return l===r?1:0; case "!=": return l!==r?1:0;
-          case "<": return l<r?1:0; case ">": return l>r?1:0;
-          case "<=": return l<=r?1:0; case ">=": return l>=r?1:0;
-          case "&&": return (l&&r)?1:0; case "||": return (l||r)?1:0;
-          case "LSHIFT": return l<<r; case "RSHIFT": return l>>r;
-          default: return 0;
+          case "&&": {
+            const l = evalE(node.l);
+            if (!l) return 0;
+            const r = evalE(node.r);
+            return (l && r) ? 1 : 0;
+          }
+          case "||": {
+            const l = evalE(node.l);
+            if (l) return 1;
+            const r = evalE(node.r);
+            return (l || r) ? 1 : 0;
+          }
+          default: {
+            const l=evalE(node.l), r=evalE(node.r);
+            switch(node.op) {
+              case "+": return (typeof l==="string"||typeof r==="string")?String(l)+String(r):l+r;
+              case "-": return l-r; case "*": return l*r;
+              case "/": if(r===0) throw mkErr("Division by zero",ln); return (Number.isInteger(l)&&Number.isInteger(r))?Math.trunc(l/r):l/r;
+              case "%": if(r===0) return 0; return ((l%r)+Math.abs(r))%Math.abs(r);
+              case "==": return l===r?1:0; case "!=": return l!==r?1:0;
+              case "<": return l<r?1:0; case ">": return l>r?1:0;
+              case "<=": return l<=r?1:0; case ">=": return l>=r?1:0;
+              case "LSHIFT": return l<<r; case "RSHIFT": return l>>r;
+              default: return 0;
+            }
+          }
         }
       }
       case "Unary": {
@@ -701,17 +746,17 @@ function interpret(ast, stdinStr) {
         if(fname==="scanf") {
           const fmt=typeof argVals[0]==="string"?argVals[0]:"";
           const specs=[...fmt.matchAll(/%[diouxXfgecs]/g)];
-          const inputLine=stdinLines[stdinPos]||"0"; const parts=inputLine.trim().split(/\s+/); let pi=0;
+          if(stdinTokPos>=stdinTokens.length) throw mkErr("scanf: no stdin provided", ln);
           for(let si=0;si<specs.length;si++){
             const arg=node.args[si+1];
-            const raw=parts[pi++]||"0";
+            const raw=stdinTokens[stdinTokPos++]||"0";
             const val=specs[si][0]==="%c"?raw.charCodeAt(0):parseFloat(raw)||0;
             if(arg&&arg.kind==="Unary"&&arg.op==="&"&&arg.expr.kind==="Id"){
               try{writeVar(arg.expr.name,val,ln);}catch(e){if(curFrame())curFrame().locals[arg.expr.name]=val;}
               snap(ln,`scanf → ${arg.expr.name} = ${val}`);
             }
           }
-          stdinPos++; return specs.length;
+          return specs.length;
         }
         if(fname==="malloc"||fname==="calloc") {
           const size=fname==="calloc"?(argVals[0]||1)*(argVals[1]||4):(argVals[0]||4);
@@ -763,6 +808,7 @@ function interpret(ast, stdinStr) {
   function execStmt(node) {
     if(!node) return;
     const ln=node.line;
+    lastNode = node; lastLine = ln;
     switch(node.kind){
       case "Block": return execBlock(node);
       case "VDecl": {
@@ -865,8 +911,12 @@ function interpret(ast, stdinStr) {
 
   function execBlock(block){
     for(const s of block.stmts){
-      const r=execStmt(s);
-      if(r&&r._sig) return r;
+      try {
+        const r=execStmt(s);
+        if(r&&r._sig) return r;
+      } catch(e) {
+        throw wrapError(e);
+      }
     }
   }
 
@@ -892,28 +942,144 @@ function interpret(ast, stdinStr) {
   const mainFn=functions["main"];
   if(!mainFn) throw mkErr("No main() function found",1);
   callStack.push({name:"main",locals:{}});
-  try { execBlock(mainFn.body); } catch(e) { if(!e._sig) throw e; }
+  try { execBlock(mainFn.body); } catch(e) { if(!e._sig) throw wrapError(e); }
   callStack.pop();
   return steps;
 }
 
+function preprocessCode(code) {
+  return (code || "").replace(/^\s*#define\s+(\w+)\s+([^\r\n]+)\s*$/gm, "const int $1 = $2;");
+}
+
+function collectIds(node, out = new Set()) {
+  if (!node || typeof node !== "object") return out;
+  if (node.kind === "Id" && node.name) out.add(node.name);
+  for (const k in node) {
+    const v = node[k];
+    if (v && typeof v === "object") {
+      if (Array.isArray(v)) v.forEach(n => collectIds(n, out));
+      else collectIds(v, out);
+    }
+  }
+  return out;
+}
+
+function analyzeComplexity(ast) {
+  let maxDepth = 0;
+  const loopVars = [];
+  let hasArray = false;
+  let hasHeap = false;
+
+  function walkStmt(node, depth = 0) {
+    if (!node || typeof node !== "object") return;
+    if (node.kind === "ArrDecl" || node.kind === "GArr") hasArray = true;
+    if (node.kind === "Call" && node.fn && node.fn.kind === "Id" && node.fn.name === "malloc") hasHeap = true;
+    if (node.kind === "For" || node.kind === "While" || node.kind === "DoWhile") {
+      const cond = node.cond || node;
+      const ids = Array.from(collectIds(cond));
+      if (ids.length) loopVars.push(ids[0]);
+      const d = depth + 1;
+      if (d > maxDepth) maxDepth = d;
+      if (node.body) walkStmt(node.body, d);
+      if (node.then) walkStmt(node.then, d);
+      if (node.els) walkStmt(node.els, d);
+      if (node.stmts) node.stmts.forEach(s => walkStmt(s, d));
+      return;
+    }
+    if (node.stmts) node.stmts.forEach(s => walkStmt(s, depth));
+    if (node.then) walkStmt(node.then, depth);
+    if (node.els) walkStmt(node.els, depth);
+    if (node.body) walkStmt(node.body, depth);
+  }
+
+  if (ast && ast.body) ast.body.forEach(n => walkStmt(n, 0));
+  const nVar = loopVars.find(v => v === "n") || loopVars[0];
+  const time = maxDepth === 0 ? "O(1)" : `O(${nVar || "n"}${maxDepth > 1 ? "^" + maxDepth : ""})`;
+  const space = hasArray || hasHeap ? "O(n)" : "O(1)";
+  return { time, space, maxDepth, loopVar: nVar || "n" };
+}
+
+function analyzeStructures(ast) {
+  const structs = [];
+  const listStructs = [];
+  const treeStructs = [];
+  const avlStructs = [];
+
+  if (ast && ast.body) {
+    for (const n of ast.body) {
+      if (n.kind === "StructDef") {
+        const fields = (n.fields || []).map(f => f.name);
+        structs.push({ name: n.name, fields });
+        const hasNext = fields.includes("next") || fields.includes("nxt") || fields.includes("link");
+        const hasLeft = fields.includes("left") || fields.includes("l") || fields.includes("lchild") || fields.includes("leftChild");
+        const hasRight = fields.includes("right") || fields.includes("r") || fields.includes("rchild") || fields.includes("rightChild");
+        const hasHeight = fields.includes("height");
+        if (hasNext) listStructs.push(n.name);
+        if (hasLeft || hasRight) treeStructs.push(n.name);
+        if ((hasLeft || hasRight) && hasHeight) avlStructs.push(n.name);
+      }
+      if (n.kind === "TypedefStruct") {
+        const fields = (n.fields || []).map(f => f.name);
+        structs.push({ name: n.tname, fields });
+        const hasNext = fields.includes("next") || fields.includes("nxt") || fields.includes("link");
+        const hasLeft = fields.includes("left") || fields.includes("l") || fields.includes("lchild") || fields.includes("leftChild");
+        const hasRight = fields.includes("right") || fields.includes("r") || fields.includes("rchild") || fields.includes("rightChild");
+        const hasHeight = fields.includes("height");
+        if (hasNext) listStructs.push(n.tname);
+        if (hasLeft || hasRight) treeStructs.push(n.tname);
+        if ((hasLeft || hasRight) && hasHeight) avlStructs.push(n.tname);
+      }
+    }
+  }
+
+  return {
+    structs,
+    linkedList: Array.from(new Set(listStructs)),
+    binaryTree: Array.from(new Set(treeStructs)),
+    avlTree: Array.from(new Set(avlStructs)),
+  };
+}
+
+function analyzeCode(code) {
+  try {
+    const src = preprocessCode(code);
+    const tokens = tokenize(src);
+    const ast = parse(tokens);
+    return {
+      ok: true,
+      structures: analyzeStructures(ast),
+      complexity: analyzeComplexity(ast),
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 function runInterpreter(code, stdin) {
   try {
-    const tokens=tokenize(code);
+    const src = preprocessCode(code);
+    const tokens=tokenize(src);
     const ast=parse(tokens);
     const steps=interpret(ast,stdin);
     return {steps, error:null};
   } catch(e) {
-    return {steps:[], error:e.message+(e.cline?` (line ${e.cline})`:"")}; 
+    const trace = e._trace || {};
+    const line = trace.line || e.cline || 0;
+    const node = trace.node ? `${trace.node.kind}` : "unknown";
+    const state = trace.state ? JSON.stringify({globals: trace.state.globals, stack: trace.state.stack}) : "";
+    const stack = trace.stack ? String(trace.stack).split("\n").slice(0,5).join("\n") : "";
+    const msg = e.message + (line?` (line ${line})`:"") + `\nNode: ${node}` + (state?`\nState: ${state}`:"") + (stack?`\nStack:\n${stack}`:"");
+    return {steps:[], error:msg}; 
   }
 }
 
 function createTraceWorker() {
   if (typeof Worker === "undefined") return null;
-  const workerSrc = [
+    const workerSrc = [
     "const TWO_CHAR_OPS = " + JSON.stringify(TWO_CHAR_OPS) + ";",
     "const STEP_LIMIT = " + STEP_LIMIT + ";",
     "const NULL_ADDR = " + NULL_ADDR + ";",
+    preprocessCode.toString(),
     tokenize.toString(),
     parse.toString(),
     interpret.toString(),
@@ -1067,6 +1233,44 @@ function LinkedListViz({lists}){
               </div>
             ))}
             <span style={{color:TH.dimText,fontSize:11,fontFamily:"monospace"}}>NULL</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StackViz({items}){
+  if(!items.length) return null;
+  return(
+    <div style={{marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+        <span style={{color:TH.dimText,fontSize:10,fontWeight:700,letterSpacing:2,textTransform:"uppercase"}}>Stack</span>
+        <div style={{flex:1,height:1,background:TH.border}}/>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {items.map((v,i)=>(
+          <div key={i} style={{minWidth:46,padding:"6px 8px",background:TH.bgRaised,border:`1px solid ${TH.border}`,borderRadius:6,color:TH.white,fontFamily:"monospace",textAlign:"center"}}>
+            {v}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function QueueViz({items}){
+  if(!items.length) return null;
+  return(
+    <div style={{marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+        <span style={{color:TH.dimText,fontSize:10,fontWeight:700,letterSpacing:2,textTransform:"uppercase"}}>Queue</span>
+        <div style={{flex:1,height:1,background:TH.border}}/>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {items.map((v,i)=>(
+          <div key={i} style={{minWidth:46,padding:"6px 8px",background:TH.bgRaised,border:`1px solid ${TH.border}`,borderRadius:6,color:TH.white,fontFamily:"monospace",textAlign:"center"}}>
+            {v}
           </div>
         ))}
       </div>
@@ -1303,6 +1507,23 @@ function Viz({steps,cur}){
     }
   }
 
+  const stackItems = [];
+  const queueItems = [];
+  const globals = step.globals || {};
+  if (Array.isArray(globals.stack) && typeof globals.top === "number") {
+    const max = Math.min(globals.top, globals.stack.length - 1);
+    for (let i = 0; i <= max; i++) stackItems.push(globals.stack[i]);
+  }
+  if (Array.isArray(globals.queue)) {
+    if (typeof globals.front === "number" && typeof globals.rear === "number") {
+      const start = Math.max(0, globals.front);
+      const end = Math.min(globals.queue.length - 1, globals.rear);
+      for (let i = start; i <= end; i++) queueItems.push(globals.queue[i]);
+    } else {
+      queueItems.push(...globals.queue);
+    }
+  }
+
   return(
     <div style={{display:"flex",flexDirection:"column",gap:14,padding:14,background:TH.bgDeep,height:"100%",overflowY:"auto",overflowX:"hidden",boxSizing:"border-box"}}>
       <FlowTag desc={step.desc}/>
@@ -1347,9 +1568,11 @@ function Viz({steps,cur}){
         </div>
       )}
 
-      {(lists.length>0 || trees.length>0) && (
+      {(lists.length>0 || trees.length>0 || stackItems.length>0 || queueItems.length>0) && (
         <div>
           {lists.length>0 && <LinkedListViz lists={lists}/>}
+          {stackItems.length>0 && <StackViz items={stackItems}/>}
+          {queueItems.length>0 && <QueueViz items={queueItems}/>}
           {trees.length>0 && <TreeViz trees={trees}/>}
         </div>
       )}
@@ -1424,6 +1647,10 @@ int main() {
 export default function App() {
   const [code,setCode]       = useState(DEFAULT_CODE);
   const [input,setInput]     = useState("");
+  const [scannedInput,setScannedInput] = useState("");
+  const [hasScanned,setHasScanned] = useState(false);
+  const scannedInputRef = useRef("");
+  const hasScannedRef = useRef(false);
   const [output,setOutput]   = useState("Ready.\nClick \"Compile & Run\" to execute.");
   const [isRunning,setIsRunning] = useState(false);
   const [tab,setTab]         = useState("visualizer");
@@ -1433,6 +1660,7 @@ export default function App() {
   const [traceErr,setTraceErr] = useState("");
   const [isTracing,setIsTracing] = useState(false);
   const [playing,setPlaying] = useState(false);
+  const [analysis,setAnalysis] = useState({ ok:true, structures:{}, complexity:{} });
 
   const taRef=useRef(null), preRef=useRef(null), lnRef=useRef(null), playRef=useRef(null);
   const workerRef = useRef(null);
@@ -1470,6 +1698,13 @@ export default function App() {
     }
     return()=>clearTimeout(playRef.current);
   },[playing,curStep,traceSteps]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setAnalysis(analyzeCode(code));
+    }, 150);
+    return () => clearTimeout(t);
+  }, [code]);
 
   useEffect(() => {
     const created = createTraceWorker();
@@ -1527,14 +1762,22 @@ export default function App() {
   const runTrace = useCallback(()=>{
     setIsTracing(true); setTraceErr(""); setTraceSteps(null);
     setCurStep(0); setTab("visualizer"); setPlaying(false);
+    if(!hasScannedRef.current && input.trim() !== "") {
+      scannedInputRef.current = input;
+      hasScannedRef.current = true;
+      setScannedInput(input);
+      setHasScanned(true);
+    }
     const runId = ++runIdRef.current;
     const worker = workerRef.current;
     if (worker) {
-      worker.postMessage({ code, stdin: input, runId });
+      const stdin = hasScannedRef.current ? scannedInputRef.current : "";
+      worker.postMessage({ code, stdin, runId });
       return;
     }
     setTimeout(()=>{
-      const{steps,error}=runInterpreter(code,input);
+      const stdin = hasScannedRef.current ? scannedInputRef.current : "";
+      const{steps,error}=runInterpreter(code, stdin);
       if(error) setTraceErr(error);
       else if(!steps.length) setTraceErr("No steps - does your code have a main() function?");
       else setTraceSteps(steps);
@@ -1547,8 +1790,15 @@ export default function App() {
     const worker = wasmWorkerRef.current;
     const runId = ++wasmRunIdRef.current;
     const baseUrl = `${import.meta.env.BASE_URL || "/"}wasm/`;
+    if(!hasScannedRef.current && input.trim() !== "") {
+      scannedInputRef.current = input;
+      hasScannedRef.current = true;
+      setScannedInput(input);
+      setHasScanned(true);
+    }
     if (worker) {
-      worker.postMessage({ code, stdin: input, runId, baseUrl });
+      const stdin = hasScannedRef.current ? scannedInputRef.current : "";
+      worker.postMessage({ code, stdin, runId, baseUrl });
       return;
     }
     setOutput("Error: WASM worker unavailable.");
@@ -1649,6 +1899,7 @@ export default function App() {
             <TabBtn id="output" label="Output" Icon={Terminal} color={TH.green}/>
             <TabBtn id="input" label="Input" Icon={Keyboard} color={TH.orange}/>
             <TabBtn id="visualizer" label="Visualizer" Icon={Eye} color={TH.accent}/>
+            <TabBtn id="analysis" label="Analysis" Icon={ListTree} color={TH.purple}/>
           </div>
 
           <div style={{flex:1,overflow:"hidden",position:"relative"}}>
@@ -1658,8 +1909,26 @@ export default function App() {
               </div>
             )}
             {tab==="input"&&(
-              <textarea value={input} onChange={e=>setInput(e.target.value)} placeholder="stdin for scanf()…" spellCheck={false}
-                style={{width:"100%",height:"100%",padding:14,background:"transparent",color:TH.bright,fontFamily:"monospace",fontSize:12,resize:"none",outline:"none",border:"none",boxSizing:"border-box"}}/>
+              <div style={{height:"100%",display:"flex",flexDirection:"column"}}>
+                <div style={{padding:"10px 14px",borderBottom:`1px solid ${TH.border}`,display:"flex",alignItems:"center",gap:10}}>
+                  <button
+                    onClick={()=>{
+                      scannedInputRef.current = input;
+                      hasScannedRef.current = true;
+                      setScannedInput(input);
+                      setHasScanned(true);
+                    }}
+                    style={{padding:"6px 12px",background:TH.accent,border:"none",borderRadius:6,color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}
+                  >
+                    Scan
+                  </button>
+                  <span style={{color:hasScanned?TH.green:TH.dimText,fontSize:10,fontFamily:"monospace"}}>
+                    {hasScanned ? "Input captured" : "Not scanned"}
+                  </span>
+                </div>
+                <textarea value={input} onChange={e=>{setInput(e.target.value); setHasScanned(false); hasScannedRef.current=false;}} placeholder="stdin for scanf()…" spellCheck={false}
+                  style={{flex:1,width:"100%",padding:14,background:"transparent",color:TH.bright,fontFamily:"monospace",fontSize:12,resize:"none",outline:"none",border:"none",boxSizing:"border-box"}}/>
+              </div>
             )}
             {tab==="visualizer"&&(
               isTracing?(
@@ -1693,9 +1962,36 @@ export default function App() {
                 </div>
               )
             )}
+            {tab==="analysis"&&(
+              <div style={{height:"100%",overflowY:"auto",padding:14}}>
+                {!analysis.ok ? (
+                  <div style={{color:TH.red,fontFamily:"monospace",fontSize:12}}>{analysis.error}</div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    <div style={{background:TH.bgRaised,border:`1px solid ${TH.border}`,borderRadius:8,padding:12}}>
+                      <div style={{color:TH.dimText,fontSize:10,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Detected Structures</div>
+                      <div style={{color:TH.white,fontSize:12,fontFamily:"monospace",lineHeight:1.7}}>
+                        <div>Linked List: {analysis.structures.linkedList?.length?analysis.structures.linkedList.join(", "):"none"}</div>
+                        <div>Binary Tree: {analysis.structures.binaryTree?.length?analysis.structures.binaryTree.join(", "):"none"}</div>
+                        <div>AVL Tree: {analysis.structures.avlTree?.length?analysis.structures.avlTree.join(", "):"none"}</div>
+                      </div>
+                    </div>
+                    <div style={{background:TH.bgRaised,border:`1px solid ${TH.border}`,borderRadius:8,padding:12}}>
+                      <div style={{color:TH.dimText,fontSize:10,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Complexity</div>
+                      <div style={{color:TH.white,fontSize:12,fontFamily:"monospace",lineHeight:1.7}}>
+                        <div>Time: {analysis.complexity.time||"O(1)"}</div>
+                        <div>Space: {analysis.complexity.space||"O(1)"}</div>
+                        <div>Loop Depth: {analysis.complexity.maxDepth||0}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
   );
 }
+

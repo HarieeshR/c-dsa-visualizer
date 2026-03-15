@@ -288,14 +288,19 @@ class App {
   random_get(buf, buf_len) {
     const data = new Uint8Array(this.mem.buffer, buf, buf_len);
     for (let i = 0; i < buf_len; ++i) data[i] = (Math.random() * 256) | 0;
+    return ESUCCESS;
   }
 
   clock_time_get(clock_id, precision, time_out) {
-    throw new NotImplemented("wasi_unstable", "clock_time_get");
+    this.mem.check();
+    this.mem.write64(time_out, 0, 0);
+    return ESUCCESS;
   }
 
   poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_out) {
-    throw new NotImplemented("wasi_unstable", "poll_oneoff");
+    this.mem.check();
+    this.mem.write64(nevents_out, 0, 0);
+    return ESUCCESS;
   }
 }
 
