@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Play, Terminal, Code2, Loader2, Copy, Check, FileText, Keyboard, Eye, ChevronLeft, ChevronRight, Cpu, AlertTriangle, SkipBack, SkipForward, ListTree } from "lucide-react";
 
-// ─── THEME ───────────────────────────────────────────────────
+// ─── THEME ───
 const TH = {
   bgDeep:"#0a0e1a", bgCard:"#0f1629", bgRaised:"#161e35",
   border:"#1e2d4a", dimText:"#4a6080", midText:"#7a95b8",
@@ -16,9 +16,9 @@ const ctrlBtnStyle = {
   cursor:"pointer", letterSpacing:0.5,
 };
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════
 //  TOKENIZER
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════
 const TWO_CHAR_OPS = ["==","!=","<=",">=","&&","||","++","--","+=","-=","*=","/=","%=","->"];
 
 function tokenize(src) {
@@ -2025,4 +2025,3 @@ export default function App() {
     </div>
   );
 }
-
