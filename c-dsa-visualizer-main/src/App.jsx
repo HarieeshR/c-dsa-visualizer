@@ -284,9 +284,9 @@ function parse(tokens) {
     }
 
     if (isVarDecl()) {
-      let structType=null;
-      if (peek().v==="struct") { consume(); structType=consume().v; }
-      else while (TYPE_KW.has(peek().v)) consume();
+      let structType=null; let typeStr="int";
+      if (peek().v==="struct") { consume(); structType=consume().v; typeStr=structType; }
+      else { const tp=[]; while(TYPE_KW.has(peek().v)) tp.push(consume().v); typeStr=tp.join(" ")||"int"; }
       const isPtr=match("*");
       const vn=consume().v;
       if (peek().v==="[") {
@@ -294,14 +294,14 @@ function parse(tokens) {
         let init=null;
         if (peek().v==="=" && peek(1).v==="{") { consume(); expect("{"); const els=[]; while(peek().v!=="}"){ els.push(expr()); match(","); } expect("}"); init={kind:"ArrLit",els}; }
         else if (match("=")) init=expr();
-        match(";"); return {kind:"ArrDecl",name:vn,sz,init,structType,line};
+        match(";"); return {kind:"ArrDecl",name:vn,sz,init,structType,type:typeStr,line};
       }
       let init=null; if (match("=")) init=expr();
       const decls=[{name:vn,init,isPtr}];
       while (match(",")) { match("*"); const n2=consume().v; let i2=null; if (match("=")) i2=expr(); decls.push({name:n2,init:i2}); }
       match(";");
-      if (decls.length===1) return {kind:"VDecl",name:vn,init,isPtr,structType,line};
-      return {kind:"MDecl",decls,structType,line};
+      if (decls.length===1) return {kind:"VDecl",name:vn,init,isPtr,structType,type:typeStr,line};
+      return {kind:"MDecl",decls,structType,type:typeStr,line};
     }
     const e=expr(); match(";"); return {kind:"Estmt",expr:e,line};
   }
@@ -411,6 +411,16 @@ function interpret(ast, stdinStr) {
   let stdinTokPos = 0;
   const callStack = [];
   const curFrame = () => callStack[callStack.length-1];
+  const STACK_BASE = 0x7ffc0000;
+  function sizeOf(type, isPtr) {
+    if (isPtr) return 4;
+    if (!type) return 4;
+    const t = String(type).toLowerCase();
+    if (t.includes("char")) return 1;
+    if (t.includes("short")) return 2;
+    if (t.includes("long long") || t.includes("double")) return 8;
+    return 4;
+  }
 
   const mkErr = (msg, line) => Object.assign(new Error(msg), {cline:line});
   let lastNode = null;
@@ -419,7 +429,7 @@ function interpret(ast, stdinStr) {
   function captureState() {
     return {
       globals: deepCopy(globals),
-      stack: callStack.map(f => ({name:f.name, locals:deepCopy(f.locals)})),
+      stack: callStack.map(f => ({name:f.name, locals:deepCopy(f.locals), addrs:deepCopy(f.addrs||{})})),
       heap: deepCopy(heap),
     };
   }
@@ -445,7 +455,7 @@ function interpret(ast, stdinStr) {
     if (++stepCount > STEP_LIMIT) throw mkErr("Step limit — possible infinite loop", line);
     steps.push({
       line, desc,
-      stack: callStack.map(f => ({name:f.name, locals:deepCopy(f.locals)})),
+      stack: callStack.map(f => ({name:f.name, locals:deepCopy(f.locals), addrs:deepCopy(f.addrs||{})})),
       globals: deepCopy(globals),
       heap: deepCopy(heap),
       stdout,
@@ -811,7 +821,7 @@ function interpret(ast, stdinStr) {
 
         const fn=functions[fname];
         if(!fn){ snap(ln,`call ${fname}() [unknown]`); return 0; }
-        const frame={name:fname, locals:{}};
+        const frame={name:fname, locals:{}, addrs:{}, stackPtr:STACK_BASE - callStack.length*0x400};
         fn.params.forEach((p,idx)=>{ frame.locals[p.name]=argVals[idx]!==undefined?argVals[idx]:0; });
         callStack.push(frame);
         snap(ln, `call ${fname}(${argVals.map(fmtVal).join(", ")})`);
@@ -837,17 +847,24 @@ function interpret(ast, stdinStr) {
       case "Block": return execBlock(node);
       case "VDecl": {
         const val=node.init?evalE(node.init):0;
-        // FIX: ensure frame exists before writing
-        if(callStack.length > 0) curFrame().locals[node.name]=val;
-        else globals[node.name]=val;
+        if(callStack.length > 0) {
+          const fr=curFrame();
+          fr.addrs[node.name]=fr.stackPtr;
+          fr.stackPtr += sizeOf(node.type, node.isPtr);
+          fr.locals[node.name]=val;
+        } else globals[node.name]=val;
         snap(ln, `declare ${node.name} = ${fmtVal(val)}`);
         return;
       }
       case "MDecl": {
         for(const d of node.decls) {
           const v = d.init?evalE(d.init):0;
-          if(callStack.length > 0) curFrame().locals[d.name]=v;
-          else globals[d.name]=v;
+          if(callStack.length > 0) {
+            const fr=curFrame();
+            fr.addrs[d.name]=fr.stackPtr;
+            fr.stackPtr += sizeOf(node.type, d.isPtr);
+            fr.locals[d.name]=v;
+          } else globals[d.name]=v;
         }
         snap(ln, `declare ${node.decls.map(d=>`${d.name}`).join(", ")}`);
         return;
@@ -858,8 +875,12 @@ function interpret(ast, stdinStr) {
         else if(node.init&&node.init.kind==="Str"){arr=[...node.init.v].map(c=>c.charCodeAt(0));arr.push(0);}
         else if(node.init){const v=evalE(node.init);arr=typeof v==="string"?[...v].map(c=>c.charCodeAt(0)).concat([0]):[v];}
         else{const sz=node.sz?Math.min(evalE(node.sz),512):10;arr=new Array(sz).fill(0);}
-        if(callStack.length > 0) curFrame().locals[node.name]=arr;
-        else globals[node.name]=arr;
+        if(callStack.length > 0) {
+          const fr=curFrame();
+          fr.addrs[node.name]=fr.stackPtr;
+          fr.stackPtr += sizeOf(node.type, false) * arr.length;
+          fr.locals[node.name]=arr;
+        } else globals[node.name]=arr;
         snap(ln, `declare ${node.name}[${arr.length}]`);
         return;
       }
@@ -965,7 +986,7 @@ function interpret(ast, stdinStr) {
 
   const mainFn=functions["main"];
   if(!mainFn) throw mkErr("No main() function found",1);
-  callStack.push({name:"main",locals:{}});
+  callStack.push({name:"main",locals:{},addrs:{},stackPtr:STACK_BASE});
   let _interpErr=null;
   try { execBlock(mainFn.body); } catch(e) { if(!e._sig) _interpErr=wrapError(e); }
   callStack.pop();
@@ -1153,7 +1174,7 @@ function highlight(code) {
 // ════════════════════════════════════════════════════════════
 //  VISUALIZER COMPONENTS
 // ════════════════════════════════════════════════════════════
-function VarCell({name, val, changed}){
+function VarCell({name, val, changed, addr}){
   const isArr=Array.isArray(val);
   const isStruct=val&&typeof val==="object"&&val.__type==="struct";
   const isPtr=!isArr&&!isStruct&&typeof val==="number"&&val>=256&&val<0x10000;
@@ -1171,6 +1192,7 @@ function VarCell({name, val, changed}){
         {isStruct&&<span style={{fontSize:9,color:"#06b6d4",background:"#06b6d420",padding:"1px 4px",borderRadius:3}}>STRUCT</span>}
         {changed&&!isArr&&!isStruct&&<span style={{width:5,height:5,borderRadius:"50%",background:TH.accent,display:"inline-block",marginLeft:"auto"}}/>}
       </div>
+      {addr!==undefined&&<div style={{color:TH.dimText,fontSize:9,fontFamily:"monospace",marginBottom:3}}>0x{addr.toString(16)}</div>}
       {isArr&&(
         <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
           {val.map((v,i)=>(
@@ -1392,7 +1414,8 @@ function FrameCard({frame,isTop,prevFrame}){
           ?<span style={{color:TH.dimText,fontSize:11,fontStyle:"italic"}}>empty frame</span>
           :entries.map(([k,v])=>{
             const pv=prevFrame&&prevFrame.locals[k];
-            return <VarCell key={k} name={k} val={v} changed={!prevFrame||JSON.stringify(pv)!==JSON.stringify(v)}/>;
+            const addr=frame.addrs&&frame.addrs[k];
+            return <VarCell key={k} name={k} val={v} changed={!prevFrame||JSON.stringify(pv)!==JSON.stringify(v)} addr={addr}/>;
           })
         }
       </div>

@@ -1,7 +1,7 @@
 ﻿import { TH } from "../theme";
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-function VarCell({name, val, changed}){
+function VarCell({name, val, changed, addr}){
   const isArr=Array.isArray(val);
   const isStruct=val&&typeof val==="object"&&val.__type==="struct";
   const isPtr=!isArr&&!isStruct&&typeof val==="number"&&val>=256&&val<0x10000;
@@ -19,6 +19,7 @@ function VarCell({name, val, changed}){
         {isStruct&&<span style={{fontSize:9,color:"#06b6d4",background:"#06b6d420",padding:"1px 4px",borderRadius:3}}>STRUCT</span>}
         {changed&&!isArr&&!isStruct&&<span style={{width:5,height:5,borderRadius:"50%",background:TH.accent,display:"inline-block",marginLeft:"auto"}}/>}
       </div>
+      {addr!==undefined&&<div style={{color:TH.dimText,fontSize:9,fontFamily:"monospace",marginBottom:3}}>0x{addr.toString(16)}</div>}
       {isArr&&(
         <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
           {val.map((v,i)=>(
@@ -240,7 +241,8 @@ function FrameCard({frame,isTop,prevFrame}){
           ?<span style={{color:TH.dimText,fontSize:11,fontStyle:"italic"}}>empty frame</span>
           :entries.map(([k,v])=>{
             const pv=prevFrame&&prevFrame.locals[k];
-            return <VarCell key={k} name={k} val={v} changed={!prevFrame||JSON.stringify(pv)!==JSON.stringify(v)}/>;
+            const addr=frame.addrs&&frame.addrs[k];
+            return <VarCell key={k} name={k} val={v} changed={!prevFrame||JSON.stringify(pv)!==JSON.stringify(v)} addr={addr}/>;
           })
         }
       </div>
